@@ -33,7 +33,7 @@ SEEN_FILE = os.path.join(BASE, "seen.json")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_IDS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
 
-TIMEOUT = 25
+TIMEOUT = (8, 15)   # (connect, read) seconds
 MAX_NEW_PER_SOURCE = 15      # isse zyada naye links = shayad site ka layout badla, spam nahi bhejenge
 MAX_SEEN_PER_SOURCE = 3000
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -253,10 +253,12 @@ def main():
         return
 
     changed, sent = False, 0
+    failed = []
     for src, (items, err) in zip(sources, results):
         name = src["name"]
         if err:
-            print(f"[x] {name}: {err}")
+            print(f"[x] {name}: {err[:120]}")
+            failed.append(name)
             continue
         if not items:
             print(f"[-] {name}: koi relevant link nahi mila")
@@ -293,6 +295,8 @@ def main():
     if changed:
         with open(SEEN_FILE, "w", encoding="utf-8") as f:
             json.dump(seen, f, ensure_ascii=False, indent=0)
+    if failed:
+        print(f"\nFAILED SITES ({len(failed)}): " + ", ".join(failed))
     print(f"Done. {sent} alert(s) bheje gaye.")
 
 
