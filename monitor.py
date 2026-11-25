@@ -21,14 +21,23 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin, urlparse
 
+import ssl
+
 import requests
+from requests.adapters import HTTPAdapter
 from bs4 import BeautifulSoup
+
+try:
+    import lxml  # noqa: F401
+    PARSER = "lxml"
+except ImportError:      # Termux par lxml na ho to built-in parser
+    PARSER = "html.parser"
 
 requests.packages.urllib3.disable_warnings()
 
 BASE = os.path.dirname(os.path.abspath(__file__))
-SOURCES_FILE = os.path.join(BASE, "sources.json")
-SEEN_FILE = os.path.join(BASE, "seen.json")
+SOURCES_FILE = os.getenv("SOURCES_FILE", os.path.join(BASE, "sources.json"))
+SEEN_FILE = os.getenv("SEEN_FILE", os.path.join(BASE, "seen.json"))
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_IDS = [c.strip() for c in os.getenv("TELEGRAM_CHAT_ID", "").split(",") if c.strip()]
@@ -79,12 +88,36 @@ def now_ist():
     return datetime.now(IST)
 
 
+class LegacySSLAdapter(HTTPAdapter):
+    """Purani sarkari sites (weak ciphers / legacy renegotiation) ke liye."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        try:
+            ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+        except ssl.SSLError:
+            pass
+        ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+        kwargs["ssl_context"] = ctx
+        super().init_poolmanager(*args, **kwargs)
+
+
 def fetch(url, stream=False):
-    """SSL error aane par (sarkari sites mein common) verify=False se dobara try karta hai."""
+    """Normal -> verify=False -> legacy SSL, is order mein try karta hai."""
+    kw = dict(headers=HEADERS, timeout=TIMEOUT, stream=stream)
     try:
-        return requests.get(url, headers=HEADERS, timeout=TIMEOUT, stream=stream)
+        return requests.get(url, **kw)
     except requests.exceptions.SSLError:
-        return requests.get(url, headers=HEADERS, timeout=TIMEOUT, stream=stream, verify=False)
+        pass
+    try:
+        return requests.get(url, verify=False, **kw)
+    except requests.exceptions.SSLError:
+        pass
+    sess = requests.Session()
+    sess.mount("https://", LegacySSLAdapter())
+    return sess.get(url, verify=False, **kw)
 
 
 def norm_url(u):
@@ -125,7 +158,7 @@ def scrape_source(src):
     except Exception as e:  # noqa: BLE001
         return [], f"{type(e).__name__}: {e}"
 
-    soup = BeautifulSoup(r.content, "lxml")
+    soup = BeautifulSoup(r.content, PARSER)
     items, seen_urls = [], set()
 
     for a in soup.find_all("a", href=True):
@@ -173,7 +206,7 @@ def summarize(url):
             reader = PdfReader(io.BytesIO(data))
             text = clean(reader.pages[0].extract_text() or "")
         elif "html" in ctype:
-            soup = BeautifulSoup(r.raw.read(600_000, decode_content=True), "lxml")
+            soup = BeautifulSoup(r.raw.read(600_000, decode_content=True), PARSER)
             meta = soup.find("meta", attrs={"name": "description"}) or \
                 soup.find("meta", attrs={"property": "og:description"})
             text = clean(meta.get("content", "")) if meta else ""
